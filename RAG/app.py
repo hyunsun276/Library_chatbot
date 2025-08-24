@@ -7,7 +7,7 @@ import streamlit as st
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
 from dotenv import load_dotenv
-from stage1_chunk_and_embed import main as build_chunks
+from chunking import main as build_chunks
 from DB_MAKING import main as build_db
 
 # 앱 시작 시 DB 초기화
