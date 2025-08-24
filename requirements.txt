@@ -1,0 +1,8 @@
+streamlit
+openai
+chromadb
+langchain
+langchain-openai
+langchain-chroma
+rank-bm25
+python-dotenv
