@@ -45,9 +45,10 @@ def ensure_chroma_db():
 ensure_chroma_db()
 
 # ----------------- Chroma 로드 -----------------
-PERSIST_DIR = tempfile.mkdtemp()   # 실행할 때마다 임시 폴더 생성
-client = chromadb.PersistentClient(path=PERSIST_DIR)
+import chromadb
+client = chromadb.Client()   # InMemory DB
 col = client.get_or_create_collection(name=COLLECTION, embedding_function=None)
+
 
 results = col.get(include=["documents","metadatas"], limit=999999)
 all_ids, all_docs, all_metas = results["ids"], results["documents"], results["metadatas"]
