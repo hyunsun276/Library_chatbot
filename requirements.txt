@@ -6,3 +6,5 @@ langchain-openai
 langchain-chroma
 rank-bm25
 python-dotenv
+chromadb==0.4.24
+pysqlite3-binary
