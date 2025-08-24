@@ -7,6 +7,12 @@ import streamlit as st
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
 from dotenv import load_dotenv
+from stage1_chunk_and_embed import main as build_chunks
+from DB_MAKING import main as build_db
+
+# 앱 시작 시 DB 초기화
+build_chunks()
+build_db()
 
 # ----------------- 환경변수 -----------------
 load_dotenv()
@@ -39,6 +45,7 @@ def ensure_chroma_db():
 ensure_chroma_db()
 
 # ----------------- Chroma 로드 -----------------
+PERSIST_DIR = tempfile.mkdtemp()   # 실행할 때마다 임시 폴더 생성
 client = chromadb.PersistentClient(path=PERSIST_DIR)
 col = client.get_or_create_collection(name=COLLECTION, embedding_function=None)
 
