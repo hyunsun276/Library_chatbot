@@ -1,22 +1,20 @@
 # app.py
 # RAG 검색 + 페르소나 주입 + 답변 생성
 
-import os
-from dotenv import load_dotenv
-load_dotenv()  # .env 파일 불러오기
-
-# 키는 코드에 직접 안 적고, 환경변수에서 읽음
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+import os, re
 import chromadb
 import streamlit as st
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
+from dotenv import load_dotenv
 
-oa = OpenAI()
+# ----------------- 환경변수 -----------------
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+oa = OpenAI(api_key=OPENAI_API_KEY)
 
-# ================= 기본 설정 =================
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
-PERSIST_DIR   = os.getenv("PERSIST_DIR", os.path.join(BASE_DIR, "..", "rag", ".chroma"))
+PERSIST_DIR   = os.getenv("PERSIST_DIR", os.path.join(BASE_DIR, "RAG", ".chroma"))
 COLLECTION    = os.getenv("COLLECTION", "library-all")
 MODEL         = os.getenv("MODEL", "gpt-4o")
 TOP_K         = int(os.getenv("TOP_K", "6"))
@@ -29,7 +27,18 @@ WORK_ID_MAP = {
     "소년이 온다": "so-nyeon-i-onda"
 }
 
-# ================= Chroma 로드 =================
+# ----------------- DB 체크 & 생성 -----------------
+def ensure_chroma_db():
+    if not os.path.exists(PERSIST_DIR) or not os.listdir(PERSIST_DIR):
+        print("[INIT] No Chroma DB found. Building new DB...")
+        from stage1_chunk_and_embed import main as chunk_and_embed
+        from DB_MAKING import main as make_db
+        chunk_and_embed()
+        make_db()
+
+ensure_chroma_db()
+
+# ----------------- Chroma 로드 -----------------
 client = chromadb.PersistentClient(path=PERSIST_DIR)
 col = client.get_or_create_collection(name=COLLECTION, embedding_function=None)
 
@@ -42,7 +51,7 @@ bm25 = BM25Okapi([
 ])
 id2doc = {i: (t, m) for i, t, m in zip(all_ids, all_docs, all_metas)}
 
-# ================= 검색 함수 =================
+# ----------------- 검색 함수 -----------------
 def reciprocal_rank_fusion(results_lists, k=60):
     scores = {}
     for res in results_lists:
@@ -61,134 +70,82 @@ def hybrid_retrieve(query, top_k, work_id=None):
     tokens = [tok for tok in re.sub(r"[^0-9a-zA-Z가-힣\s]", " ", query.lower()).split()]
     scores = bm25.get_scores(tokens)
     ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k*3]
-    bm25_ids = [
-        all_ids[i] for i, _ in ranked
-        if (not work_id or all_metas[i].get("work_id") == work_id)
-    ]
+    bm25_ids = [all_ids[i] for i,_ in ranked if (not work_id or all_metas[i].get("work_id")==work_id)]
 
     fused = reciprocal_rank_fusion([vec_ids, bm25_ids])
     hits = []
-    for did, _ in fused:
+    for did,_ in fused:
         txt, meta = id2doc[did]
-        if meta.get("spoiler_level", 3) <= SPOILER_LEVEL:
+        if meta.get("spoiler_level",3) <= SPOILER_LEVEL:
             hits.append((did, txt, meta))
-        if len(hits) >= top_k:
-            break
+        if len(hits)>=top_k: break
     return hits
 
-# ================= 프롬프트 생성 =================
+# ----------------- 프롬프트 -----------------
 def make_prompt(query, hits, work_id=None, speak_as=None, history=[]):
     persona_block = ""
     if speak_as and work_id:
-        persos = [
-            txt for i, (txt, meta) in id2doc.items()
-            if meta.get("work_id") == work_id
-            and meta.get("kind") in ["persona", "characters_raw"]
-            and (speak_as in meta.get("character", ""))
-        ]
+        persos = [txt for i,(txt,meta) in id2doc.items()
+                  if meta.get("work_id")==work_id
+                  and meta.get("kind") in ["persona","characters_raw"]
+                  and (speak_as in meta.get("character",""))]
         if persos:
             persona_block = f"[인물 페르소나: {speak_as}]\n{persos[0]}"
 
     context_cards = []
-    for _, txt, meta in hits:
+    for _,txt,meta in hits:
         title = meta.get("scene_title") or meta.get("chapter_label") or meta.get("kind")
         context_cards.append(f"### {title}\n{txt}")
 
     system = (
         "당신은 소설 속 인물의 말투를 재현하는 AI입니다.\n"
         "컨텍스트를 근거로 사용하세요.\n"
-        "당신이 소설 속 등장인물이라고 생각하세요.\n"
-        "대화할 때는 해당 인물의 말투/가치관을 반영해 1~2문장 이내로 대답하세요.\n"
-        "답할때는 대화하듯이 자연스럽게 얘기해"
+        "소설 속 인물로 대화하듯 답변하세요 (1~2문장).\n"
     )
     if persona_block:
         system += "\n\n" + persona_block
 
-    msgs = [{"role": "system", "content": system}]
-    if history:
-        msgs.extend(history[-6:])   # 최근 6턴만 유지
-
+    msgs = [{"role":"system","content":system}]
+    if history: msgs.extend(history[-6:])
     user = f"질문: {query}\n\n[컨텍스트]\n" + "\n\n".join(context_cards[:8])
-    msgs.append({"role": "user", "content": user})
+    msgs.append({"role":"user","content":user})
     return msgs
 
-# ================= 답변 생성 =================
+# ----------------- 답변 생성 -----------------
 def generate(messages):
     try:
         resp = oa.responses.create(model=MODEL, input=messages)
-        return getattr(resp, "output_text", "").strip()
+        return getattr(resp,"output_text","").strip()
     except Exception:
         comp = oa.chat.completions.create(model=MODEL, messages=messages)
         return comp.choices[0].message.content.strip()
 
-# ================= Streamlit UI =================
+# ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="📚 소설 캐릭터 챗봇", layout="centered")
-
-# 👉 카톡 스타일 CSS
-st.markdown("""
-<style>
-html, body, .stApp { background-color: #CFE7FF !important; }
-.chat-container { display: flex; flex-direction: column; padding: 20px; }
-.user-message {
-  background-color: #FFEB00; color: #000;
-  padding: 10px 14px; border-radius: 18px 0 18px 18px;
-  max-width: 70%; font-size: 15px; line-height: 1.4;
-  align-self: flex-end; margin: 6px 0 6px auto;
-}
-.bot-message {
-  background-color: #FFFFFF; color: #000;
-  padding: 10px 14px; border-radius: 0 18px 18px 18px;
-  max-width: 70%; font-size: 15px; line-height: 1.4;
-  align-self: flex-start; margin: 6px auto 6px 0;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# 세션 상태 초기화
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "work_id" not in st.session_state:
-    st.session_state.work_id = None
-if "speak_as" not in st.session_state:
-    st.session_state.speak_as = None
 
 st.title("📚 소설 속 인물과 대화하기")
 
-prev_work = st.session_state.get("work_id")
-prev_speak = st.session_state.get("speak_as")
-
-work_kor = st.selectbox("작품 선택", ["지구 끝의 온실", "종의 기원", "소년이 온다"])
+# 작품/인물 선택
+work_kor = st.selectbox("작품 선택", ["지구 끝의 온실","종의 기원","소년이 온다"])
 st.session_state.work_id = WORK_ID_MAP.get(work_kor)
 st.session_state.speak_as = st.text_input("인물 선택 (예: 유진, 동호, 아영 등)", "")
 
-# 작품/인물이 바뀌면 대화 초기화
-if (prev_work and prev_work != st.session_state.work_id) or \
-   (prev_speak and prev_speak != st.session_state.speak_as):
-    st.session_state.history = []
-    st.rerun()
-
 # 채팅 UI
-st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 for msg in st.session_state.history:
-    if msg["role"] == "user":
-        st.markdown(f'<div class="user-message">{msg["content"]}</div>', unsafe_allow_html=True)
-    elif msg["role"] == "assistant":
-        st.markdown(f'<div class="bot-message">{msg["content"]}</div>', unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
+    role_class = "user-message" if msg["role"]=="user" else "bot-message"
+    st.markdown(f'<div class="{role_class}">{msg["content"]}</div>', unsafe_allow_html=True)
 
-# 입력창
 query = st.text_input("메시지를 입력하세요", key="input")
-
 if st.button("보내기", type="primary") and query.strip():
     hits = hybrid_retrieve(query, TOP_K, st.session_state.work_id)
-    msgs = make_prompt(query, hits,
-                       work_id=st.session_state.work_id,
+    msgs = make_prompt(query, hits, work_id=st.session_state.work_id,
                        speak_as=st.session_state.speak_as,
                        history=st.session_state.history)
     ans = generate(msgs)
 
-    # 메모리에 기록
-    st.session_state.history.append({"role": "user", "content": query})
-    st.session_state.history.append({"role": "assistant", "content": ans})
-
-    st.rerun()   # ✅ 최신 Streamlit 버전에서는 이렇게
+    st.session_state.history.append({"role":"user","content":query})
+    st.session_state.history.append({"role":"assistant","content":ans})
+    st.rerun()
