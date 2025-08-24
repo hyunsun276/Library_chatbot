@@ -1,5 +1,6 @@
 # app.py
 # RAG 검색 + 페르소나 주입 + 답변 생성
+
 import os
 from dotenv import load_dotenv
 load_dotenv()  # .env 파일 불러오기
